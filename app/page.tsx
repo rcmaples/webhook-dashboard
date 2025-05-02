@@ -82,6 +82,7 @@ interface CachedData {
     payload?: string;
   }>;
   timestamp: string;
+  hasMoreData?: boolean;
 }
 
 interface ProcessedMessage {
@@ -141,6 +142,9 @@ export default function WebhookMonitor() {
   const [messagesWithParsingErrors, setMessagesWithParsingErrors] = useState<
     Map<string, string>
   >(new Map());
+  // Add loading progress tracking
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [totalItems, setTotalItems] = useState(0);
 
   // Settings state
   const [settings, setSettings] = useState(() => {
@@ -180,6 +184,8 @@ export default function WebhookMonitor() {
   useEffect(() => {
     setMessages([]);
     setError(null);
+    setLoadingProgress(0);
+    setTotalItems(0);
     fetchData();
   }, [settings]);
 
@@ -188,6 +194,8 @@ export default function WebhookMonitor() {
       setLoadingState(LoadingState.LOADING_INITIAL);
       setIsLoading(true);
       setError(null);
+      setLoadingProgress(0);
+      setTotalItems(0);
 
       // Check cache first if not forcing refresh
       if (!forceRefresh) {
@@ -246,7 +254,30 @@ export default function WebhookMonitor() {
         );
       }
 
-      const allAttempts: Attempt[] = await initialAttemptsResponse.json();
+      const attemptsData = await initialAttemptsResponse.json();
+      console.log('Raw API response structure:', {
+        hasAttemptsArray: Array.isArray(attemptsData.attempts),
+        attemptsLength: attemptsData.attempts?.length,
+        sampleAttempt:
+          attemptsData.attempts?.length > 0 ? attemptsData.attempts[0] : null,
+        paginationInfo: attemptsData.pagination,
+      });
+
+      // Display more detail about the data shape
+      if (attemptsData.attempts?.length > 0) {
+        // Count unique message IDs to understand grouping potential
+        const messageIds = new Set();
+        attemptsData.attempts.forEach((attempt: Attempt) => {
+          if (attempt.messageId) {
+            messageIds.add(attempt.messageId);
+          }
+        });
+        console.log(
+          `API returned ${attemptsData.attempts.length} webhook attempts with ${messageIds.size} unique message IDs`
+        );
+      }
+
+      const allAttempts: Attempt[] = attemptsData.attempts || [];
 
       // Process the first batch quickly to show something on screen
       const initialBatchSize = Math.min(50, allAttempts.length);
@@ -257,14 +288,50 @@ export default function WebhookMonitor() {
 
       // Process just the initial batch to show something fast
       processApiData(initialAttempts, initialDocumentIds, []);
+      console.log(
+        `Processed initial batch of ${initialAttempts.length} attempts out of ${allAttempts.length} total`
+      );
 
       // Update loading state to indicate we're now loading the full dataset
       setLoadingState(LoadingState.LOADING_FULL);
       setIsLoading(false); // We have some data to show now
 
-      // Now continue loading the rest in the background
+      // Process the remaining data in batches
+      const batchSize = 100; // Process 100 attempts at a time
+      const remainingAttempts = allAttempts.slice(initialBatchSize);
+
+      // Set total items for progress tracking
+      setTotalItems(allAttempts.length);
+      setLoadingProgress(initialBatchSize);
+
       try {
-        const messagesResponse = await messagesPromise;
+        // Start loading messages data in parallel
+        const messagesPromiseResult = messagesPromise;
+
+        // Process remaining attempts in batches while waiting for messages
+        for (let i = 0; i < remainingAttempts.length; i += batchSize) {
+          const batchEnd = Math.min(i + batchSize, remainingAttempts.length);
+          const currentBatch = allAttempts.slice(
+            0,
+            initialBatchSize + batchEnd
+          );
+
+          // Update UI with what we have so far
+          processApiData(currentBatch, initialDocumentIds, []);
+
+          // Update progress
+          const processedCount = initialBatchSize + batchEnd;
+          setLoadingProgress(processedCount);
+          console.log(
+            `Processed batch ${i}-${batchEnd} of ${remainingAttempts.length} remaining attempts (${processedCount}/${allAttempts.length})`
+          );
+
+          // Small delay to allow UI to update and not block rendering
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        // Now get the messages data (should be ready or nearly ready by now)
+        const messagesResponse = await messagesPromiseResult;
 
         if (!messagesResponse.ok) {
           const errorData = await messagesResponse.json();
@@ -278,20 +345,27 @@ export default function WebhookMonitor() {
           const messageIdToDocumentId = messagesData.documentIds || {};
           const messagesWithErrors = messagesData.messagesWithErrors || [];
 
-          // Cache the raw API data
+          // Cache the raw API data with a hasMore flag to indicate more data might be available
           const cacheData: CachedData = {
             attempts: allAttempts,
             documentIds: messageIdToDocumentId,
             messagesWithErrors,
             timestamp: new Date().toISOString(),
+            hasMoreData: true, // Indicate that there may be more data beyond what we've fetched
           };
           localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cacheData));
 
-          // Now process the full dataset
+          // Final processing with all the data
           processApiData(
             allAttempts,
             messageIdToDocumentId,
             messagesWithErrors
+          );
+
+          // Set final progress
+          setLoadingProgress(allAttempts.length);
+          console.log(
+            `Final processing complete with ${allAttempts.length} total attempts and document IDs`
           );
         }
       } catch (err) {
@@ -340,7 +414,23 @@ export default function WebhookMonitor() {
     // Process the data to group by messageId
     const messageMap = new Map<string, Attempt[]>();
 
+    // Log the first few attempts to debug
+    console.log(
+      'Sample attempts:',
+      attempts.slice(0, 3).map((a) => ({
+        id: a.id,
+        messageId: a.messageId,
+        createdAt: a.createdAt,
+        isFailure: a.isFailure,
+      }))
+    );
+
     attempts.forEach((attempt) => {
+      if (!attempt.messageId) {
+        console.warn('Found attempt without messageId:', attempt.id);
+        return;
+      }
+
       if (!messageMap.has(attempt.messageId)) {
         messageMap.set(attempt.messageId, []);
       }
@@ -348,6 +438,9 @@ export default function WebhookMonitor() {
     });
 
     console.log(`Found ${messageMap.size} unique messages`);
+
+    // Log the message IDs for debugging
+    console.log('Message IDs:', Array.from(messageMap.keys()).slice(0, 10));
 
     // Calculate the required information for each message
     const processedMessages: ProcessedMessage[] = [];
@@ -582,10 +675,24 @@ export default function WebhookMonitor() {
   const endIndex = Math.min(startIndex + itemsPerPage, sortedMessages.length);
   const currentMessages = sortedMessages.slice(startIndex, endIndex);
 
+  // Add debugging
+  console.log('Pagination debug:', {
+    totalMessages: messages.length,
+    filteredCount: filteredMessages.length,
+    sortedCount: sortedMessages.length,
+    currentPageCount: currentMessages.length,
+    currentPage,
+    itemsPerPage,
+    startIndex,
+    endIndex,
+  });
+
   // Generate page numbers for pagination
   const getPageNumbers = () => {
     const pages = [];
-    const maxVisiblePages = 5;
+    // Use window width to determine how many pages to show
+    // Default to 5 on mobile, more on larger screens
+    const maxVisiblePages = window.innerWidth >= 768 ? 7 : 5;
 
     if (totalPages <= maxVisiblePages) {
       // Show all pages if there are few
@@ -597,14 +704,15 @@ export default function WebhookMonitor() {
       pages.push(1);
 
       // Calculate range around current page
-      let startPage = Math.max(2, currentPage - 1);
-      let endPage = Math.min(totalPages - 1, currentPage + 1);
+      const pagesAroundCurrent = Math.floor((maxVisiblePages - 2) / 2);
+      let startPage = Math.max(2, currentPage - pagesAroundCurrent);
+      let endPage = Math.min(totalPages - 1, currentPage + pagesAroundCurrent);
 
       // Adjust if at edges
-      if (currentPage <= 2) {
-        endPage = 3;
-      } else if (currentPage >= totalPages - 1) {
-        startPage = totalPages - 2;
+      if (currentPage <= pagesAroundCurrent + 1) {
+        endPage = Math.min(maxVisiblePages - 1, totalPages - 1);
+      } else if (currentPage >= totalPages - pagesAroundCurrent) {
+        startPage = Math.max(2, totalPages - maxVisiblePages + 2);
       }
 
       // Add ellipsis if needed
@@ -622,8 +730,10 @@ export default function WebhookMonitor() {
         pages.push('ellipsis-end');
       }
 
-      // Always show last page
-      pages.push(totalPages);
+      // Always show last page if not already included
+      if (totalPages > 1) {
+        pages.push(totalPages);
+      }
     }
 
     return pages;
@@ -821,8 +931,8 @@ export default function WebhookMonitor() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      currentMessages.map((message) => (
-                        <React.Fragment key={message.messageId}>
+                      currentMessages.map((message, index) => (
+                        <React.Fragment key={`${message.messageId}-${index}`}>
                           <TableRow
                             className={
                               message.successRate < 100
@@ -1049,9 +1159,24 @@ export default function WebhookMonitor() {
                     {loadingState === LoadingState.LOADING_FULL && (
                       <TableRow>
                         <TableCell colSpan={7} className="py-2">
-                          <div className="flex items-center justify-center text-sm text-muted-foreground">
-                            <RefreshCw className="h-3 w-3 animate-spin mr-2" />
-                            Loading complete dataset...
+                          <div className="flex flex-col items-center justify-center text-sm text-muted-foreground gap-2">
+                            <div className="flex items-center">
+                              <RefreshCw className="h-3 w-3 animate-spin mr-2" />
+                              Loading data in batches... ({loadingProgress} of{' '}
+                              {totalItems})
+                            </div>
+                            {totalItems > 0 && (
+                              <div className="w-full max-w-md h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-in-out"
+                                  style={{
+                                    width: `${
+                                      (loadingProgress / totalItems) * 100
+                                    }%`,
+                                  }}
+                                />
+                              </div>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -1142,6 +1267,20 @@ export default function WebhookMonitor() {
                 </Pagination>
               </div>
             </>
+          )}
+
+          {/* Add a notification about data timeframe */}
+          {loadingState === LoadingState.COMPLETE && (
+            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md text-sm text-blue-700">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4" />
+                <span>
+                  Only showing webhook data from the last 12 hours due to API
+                  performance limitations. Results are limited to recent data to
+                  prevent timeouts.
+                </span>
+              </div>
+            </div>
           )}
         </CardContent>
       </Card>

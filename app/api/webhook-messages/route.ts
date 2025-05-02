@@ -30,95 +30,91 @@ export async function GET(request: Request) {
       );
     }
 
-    // Set up for pagination
+    // Set up optimized parallel fetching
     const limit = 50; // Maximum allowed by the API
-    let offset = 0;
-    const MAX_OFFSET = 1000; // Maximum offset allowed by the API
-    let hasMoreData = true;
-    let allMessages = [];
+    const MAX_PAGES = 3; // Limit to 3 pages of messages to keep response time low
 
-    // Calculate timestamp for 24 hours ago (same as attempts)
-    const twentyFourHoursAgo = new Date();
-    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+    // Calculate timestamp for 6 hours ago (reduced from 24 hours)
+    const sixHoursAgo = new Date();
+    sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
 
-    // Fetch data with pagination
-    while (hasMoreData && offset < MAX_OFFSET) {
-      const apiUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
-      // console.log(`Fetching messages from: ${apiUrl} (offset: ${offset})`)
+    console.log(
+      `Fetching messages from the last 6 hours (since ${sixHoursAgo.toISOString()})`
+    );
 
-      const response = await fetch(apiUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-        cache: 'no-store',
-      });
+    // Create offsets for parallel requests
+    const offsets = Array.from({ length: MAX_PAGES }, (_, i) => i * limit);
 
-      // Log response status for debugging
-      // console.log(`Response status: ${response.status}`)
+    console.log(`Starting ${offsets.length} parallel requests for messages`);
 
-      if (!response.ok) {
-        // Try to get more detailed error information
-        let errorText = '';
-        try {
-          const errorData = await response.json();
-          errorText = JSON.stringify(errorData);
-        } catch {
-          errorText = await response.text();
+    // Execute requests in parallel with Promise.all
+    const fetchPromises = offsets.map(async (currentOffset) => {
+      const apiUrl = `${baseUrl}?limit=${limit}&offset=${currentOffset}`;
+      console.log(`Fetching messages from: ${apiUrl}`);
+
+      try {
+        const response = await fetch(apiUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
+          cache: 'no-store',
+        });
+
+        if (!response.ok) {
+          // Try to get more detailed error information
+          let errorText = '';
+          try {
+            const errorData = await response.json();
+            errorText = JSON.stringify(errorData);
+          } catch {
+            errorText = await response.text();
+          }
+
+          console.error(`API error: ${response.status} - ${errorText}`);
+          return []; // Return empty array instead of throwing to allow other requests to complete
         }
 
-        console.error(`API error: ${response.status} - ${errorText}`);
-        throw new Error(
-          `API responded with status: ${response.status}${
-            errorText ? ` - ${errorText}` : ''
-          }`
-        );
-      }
-
-      const data = await response.json();
-      console.log(`Fetched ${data.length} messages`);
-
-      if (data.length === 0) {
-        hasMoreData = false;
-        continue;
-      }
-
-      // Filter data to only include messages from the last 24 hours
-      const recentMessages = data.filter((message) => {
-        const messageDate = new Date(message.createdAt);
-        return messageDate >= twentyFourHoursAgo;
-      });
-
-      console.log(
-        `${recentMessages.length} messages are within the last 24 hours`
-      );
-
-      // Add the recent messages to our collection
-      allMessages = [...allMessages, ...recentMessages];
-
-      // Check if we've reached data older than 24 hours
-      if (recentMessages.length < data.length) {
-        // We've started seeing data from more than 24 hours ago
-        hasMoreData = false;
+        const data = await response.json();
         console.log(
-          'Reached messages older than 24 hours, stopping pagination'
+          `Fetched ${data.length} messages at offset ${currentOffset}`
         );
-      } else if (data.length < limit) {
-        // We've reached the end of the data
-        hasMoreData = false;
-      } else {
-        // Move to the next page
-        offset += limit;
 
-        // Check if next offset would exceed the maximum
-        if (offset >= MAX_OFFSET) {
-          console.log(
-            `Reached maximum offset limit of ${MAX_OFFSET}, stopping pagination`
-          );
-          hasMoreData = false;
+        if (data.length === 0) {
+          return [];
         }
+
+        // Filter data to only include messages from the last 6 hours
+        const recentMessages = data.filter((message) => {
+          const messageDate = new Date(message.createdAt);
+          return messageDate >= sixHoursAgo;
+        });
+
+        console.log(
+          `${recentMessages.length} messages are within the last 6 hours at offset ${currentOffset}`
+        );
+
+        return recentMessages;
+      } catch (error) {
+        console.error(
+          `Error fetching messages at offset ${currentOffset}:`,
+          error
+        );
+        return []; // Return empty to allow other requests to complete
       }
-    }
+    });
+
+    // Wait for all requests to complete
+    const results = await Promise.all(fetchPromises);
+
+    // Combine results from all requests
+    const allMessages = results.flat();
+
+    // Sort messages by createdAt (newest first)
+    allMessages.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
 
     // Process messages to extract document IDs
     const messageIdToDocumentId = {};
@@ -133,9 +129,6 @@ export async function GET(request: Request) {
           }
         }
       } catch (error) {
-        // console.error(
-        //   `Error parsing payload for message ${message.id}: ${error.message}`
-        // );
         messagesWithParsingErrors.push({
           id: message.id,
           error: error.message,

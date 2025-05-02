@@ -1,123 +1,163 @@
-import { NextResponse } from "next/server"
+import { NextResponse } from 'next/server';
+
+// Define the attempt type based on the Sanity API response
+interface WebhookAttempt {
+  createdAt: string;
+  [key: string]: any;
+}
 
 export async function GET(request: Request) {
   try {
     // Get project ID and webhook ID from query parameters
-    const url = new URL(request.url)
-    const projectId = url.searchParams.get("projectId")
-    const webhookId = url.searchParams.get("webhookId")
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get('projectId');
+    const webhookId = url.searchParams.get('webhookId');
+    // Get pagination parameters from query
+    const offsetParam = url.searchParams.get('offset');
+    const limitParam = url.searchParams.get('limit');
+
+    // Parse pagination parameters with defaults
+    const initialOffset = offsetParam ? parseInt(offsetParam, 10) : 0;
+    const limit = limitParam ? Math.min(parseInt(limitParam, 10), 50) : 50; // Max 50 per request
+    const MAX_OFFSET = 950; // Maximum offset allowed (1000 total results)
+    const MAX_PAGES = 10; // Maximum number of pages to fetch
 
     // Validate required parameters
     if (!projectId || !webhookId) {
       return NextResponse.json(
-        { error: "Missing required parameters: projectId and webhookId are required" },
-        { status: 400 },
-      )
+        {
+          error:
+            'Missing required parameters: projectId and webhookId are required',
+        },
+        { status: 400 }
+      );
     }
 
-    // Calculate timestamp for 24 hours ago
-    const twentyFourHoursAgo = new Date()
-    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-    const fromTimestamp = twentyFourHoursAgo.toISOString()
-
-    // console.log(`Fetching webhook attempts since: ${fromTimestamp}`)
+    // Reduce timeframe from 24 hours to 12 hours to get fewer results
+    const twelveHoursAgo = new Date();
+    twelveHoursAgo.setHours(twelveHoursAgo.getHours() - 12);
+    const fromTimestamp = twelveHoursAgo.toISOString();
 
     // Updated URL structure based on Sanity.io API documentation
-    const baseUrl = `https://api.sanity.io/v2021-10-04/hooks/projects/${projectId}/${webhookId}/attempts`
+    const baseUrl = `https://api.sanity.io/v2021-10-04/hooks/projects/${projectId}/${webhookId}/attempts`;
 
     // Get the token from environment variables
-    const token = process.env.SANITY_API_TOKEN?.trim()
+    const token = process.env.SANITY_API_TOKEN?.trim();
 
     if (!token) {
-      throw new Error("SANITY_API_TOKEN is not defined in environment variables")
+      throw new Error(
+        'SANITY_API_TOKEN is not defined in environment variables'
+      );
     }
 
-    // Set up for pagination
-    const limit = 50 // Maximum allowed by the API
-    let offset = 0
-    const MAX_OFFSET = 1000 // Maximum offset allowed by the API
-    let hasMoreData = true
-    let allAttempts = []
-    let reachedOldData = false
+    // Set up for parallel requests
+    const MAX_PARALLEL_REQUESTS = 3; // Maximum number of parallel requests
+    const PAGES_TO_FETCH = Math.min(MAX_PAGES, 5); // Fetch fewer pages to speed up response
 
-    // Fetch data with pagination, stopping when we reach data older than 24 hours or max offset
-    while (hasMoreData && !reachedOldData && offset < MAX_OFFSET) {
-      const apiUrl = `${baseUrl}?limit=${limit}&offset=${offset}`
-      // console.log(`Fetching from: ${apiUrl} (offset: ${offset})`)
+    // Create an array of offsets for parallel fetching
+    const offsets = Array.from(
+      { length: PAGES_TO_FETCH },
+      (_, i) => initialOffset + i * limit
+    );
 
-      const response = await fetch(apiUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-        },
-        cache: "no-store",
-      })
+    console.log(
+      `Starting to fetch webhook attempts with ${offsets.length} parallel requests`
+    );
 
-      // Log response status for debugging
-      // console.log(`Response status: ${response.status}`)
+    // Execute requests in parallel with Promise.all
+    const requestPromises = offsets.map(async (currentOffset) => {
+      // Construct the API URL with pagination parameters
+      const apiUrl = `${baseUrl}?limit=${limit}&offset=${currentOffset}`;
+      console.log(`Fetching attempts page from: ${apiUrl}`);
 
-      if (!response.ok) {
-        // Try to get more detailed error information
-        let errorText = ""
-        try {
-          const errorData = await response.json()
-          errorText = JSON.stringify(errorData)
-        } catch {
-          errorText = await response.text()
+      try {
+        // Fetch data
+        const response = await fetch(apiUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
+          cache: 'no-store',
+        });
+
+        if (!response.ok) {
+          // Try to get more detailed error information
+          let errorText = '';
+          try {
+            const errorData = await response.json();
+            errorText = JSON.stringify(errorData);
+          } catch {
+            errorText = await response.text();
+          }
+
+          console.error(`API error: ${response.status} - ${errorText}`);
+          return []; // Return empty array instead of throwing to allow other requests to complete
         }
 
-        console.error(`API error: ${response.status} - ${errorText}`)
-        throw new Error(`API responded with status: ${response.status}${errorText ? ` - ${errorText}` : ""}`)
+        const data = (await response.json()) as WebhookAttempt[];
+        console.log(
+          `Fetched ${data.length} attempts at offset ${currentOffset}`
+        );
+
+        // Filter data to only include attempts from the last 12 hours
+        const recentAttempts = data.filter((attempt: WebhookAttempt) => {
+          const attemptDate = new Date(attempt.createdAt);
+          return attemptDate >= twelveHoursAgo;
+        });
+
+        console.log(
+          `${recentAttempts.length} attempts are within the last 12 hours`
+        );
+
+        return recentAttempts;
+      } catch (error) {
+        console.error(
+          `Error fetching batch at offset ${currentOffset}:`,
+          error
+        );
+        return []; // Return empty array to allow other requests to complete
       }
+    });
 
-      const data = await response.json()
-      // console.log(`Fetched ${data.length} attempts`)
+    // Wait for all requests to complete
+    const results = await Promise.all(requestPromises);
 
-      if (data.length === 0) {
-        hasMoreData = false
-        continue
-      }
+    // Combine results from all requests
+    let allAttempts = results.flat();
 
-      // Filter data to only include attempts from the last 24 hours
-      const recentAttempts = data.filter((attempt) => {
-        const attemptDate = new Date(attempt.createdAt)
-        return attemptDate >= twentyFourHoursAgo
-      })
+    // Sort attempts by createdAt date (newest first)
+    allAttempts.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
 
-      console.log(`${recentAttempts.length} attempts are within the last 24 hours`)
+    console.log(`Total webhook attempts fetched: ${allAttempts.length}`);
 
-      // Add the recent attempts to our collection
-      allAttempts = [...allAttempts, ...recentAttempts]
+    // There might be more data available
+    const hasMore = offsets.length >= MAX_PAGES;
 
-      // Check if we've reached data older than 24 hours
-      if (recentAttempts.length < data.length) {
-        // We've started seeing data from more than 24 hours ago
-        reachedOldData = true
-        console.log("Reached data older than 24 hours, stopping pagination")
-      } else if (data.length < limit) {
-        // We've reached the end of the data
-        hasMoreData = false
-      } else {
-        // Move to the next page
-        offset += limit
-
-        // Check if next offset would exceed the maximum
-        if (offset >= MAX_OFFSET) {
-          console.log(`Reached maximum offset limit of ${MAX_OFFSET}, stopping pagination`)
-          hasMoreData = false
-        }
-      }
-    }
-
-    // Log summary of data fetching
-    if (offset >= MAX_OFFSET) {
-      console.log(`Note: Only fetched data up to offset ${MAX_OFFSET} due to API limitations`)
-    }
-
-    console.log(`Total attempts fetched (last 24 hours): ${allAttempts.length}`)
-    return NextResponse.json(allAttempts)
-  } catch (error) {
-    console.error("Error fetching webhook attempts:", error)
-    return NextResponse.json({ error: error.message || "Failed to fetch webhook attempts" }, { status: 500 })
+    // Return the data with pagination metadata
+    return NextResponse.json({
+      attempts: allAttempts,
+      pagination: {
+        offset: initialOffset,
+        limit,
+        hasMore,
+        nextOffset: hasMore ? initialOffset + limit : null,
+        totalFetched: allAttempts.length,
+        pages: PAGES_TO_FETCH,
+      },
+    });
+  } catch (error: unknown) {
+    console.error('Error fetching webhook attempts:', error);
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to fetch webhook attempts',
+      },
+      { status: 500 }
+    );
   }
 }
