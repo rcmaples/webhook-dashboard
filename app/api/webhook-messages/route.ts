@@ -6,6 +6,8 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const projectId = url.searchParams.get('projectId');
     const webhookId = url.searchParams.get('webhookId');
+    // Get optional timestamp to load data before a certain point
+    const beforeTimestamp = url.searchParams.get('before');
 
     // Validate required parameters
     if (!projectId || !webhookId) {
@@ -34,13 +36,27 @@ export async function GET(request: Request) {
     const limit = 50; // Maximum allowed by the API
     const MAX_PAGES = 3; // Limit to 3 pages of messages to keep response time low
 
-    // Calculate timestamp for 6 hours ago (reduced from 24 hours)
-    const sixHoursAgo = new Date();
-    sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
+    // Set the time window based on the 'before' parameter or default to recent data
+    let timeWindowStart;
+    let timeWindowEnd;
 
-    console.log(
-      `Fetching messages from the last 6 hours (since ${sixHoursAgo.toISOString()})`
-    );
+    if (beforeTimestamp) {
+      // If 'before' parameter provided, load data from a 12-hour window before that time
+      timeWindowEnd = new Date(beforeTimestamp);
+      timeWindowStart = new Date(beforeTimestamp);
+      timeWindowStart.setHours(timeWindowStart.getHours() - 12);
+      console.log(
+        `Loading messages from ${timeWindowStart.toISOString()} to ${timeWindowEnd.toISOString()}`
+      );
+    } else {
+      // Default: load data from the last 6 hours
+      timeWindowEnd = new Date();
+      timeWindowStart = new Date();
+      timeWindowStart.setHours(timeWindowStart.getHours() - 6);
+      console.log(
+        `Fetching messages from the last 6 hours (since ${timeWindowStart.toISOString()})`
+      );
+    }
 
     // Create offsets for parallel requests
     const offsets = Array.from({ length: MAX_PAGES }, (_, i) => i * limit);
@@ -87,7 +103,7 @@ export async function GET(request: Request) {
         // Filter data to only include messages from the last 6 hours
         const recentMessages = data.filter((message) => {
           const messageDate = new Date(message.createdAt);
-          return messageDate >= sixHoursAgo;
+          return messageDate >= timeWindowStart && messageDate <= timeWindowEnd;
         });
 
         console.log(
@@ -152,6 +168,12 @@ export async function GET(request: Request) {
       documentIds: messageIdToDocumentId,
       messagesWithErrors: messagesWithParsingErrors,
       timestamp: new Date().toISOString(), // Add timestamp for cache validation
+      timeWindow: {
+        start: timeWindowStart.toISOString(),
+        end: timeWindowEnd.toISOString(),
+        olderDataAvailable:
+          !beforeTimestamp || new Date(timeWindowStart).getTime() > 0, // Indicate if there might be older data
+      },
     });
   } catch (error) {
     console.error('Error fetching webhook messages:', error);

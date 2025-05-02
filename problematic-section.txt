@@ -1,0 +1,19 @@
+      // Check for time window information to enable loading more data
+      if (messagesTimeWindow) {
+        setTimeWindow(messagesTimeWindow);
+        setHasOlderData(messagesTimeWindow.olderDataAvailable);
+      }
+
+      // Get time window information from the attempts API response
+      const attemptsData = await initialAttemptsResponse.json();
+      const attemptsTimeWindow = attemptsData.timeWindow;
+
+      // Check for time window information to enable loading more data
+      if (attemptsTimeWindow) {
+        setTimeWindow(attemptsTimeWindow);
+        setHasOlderData(attemptsTimeWindow.olderDataAvailable);
+      } else if (messagesTimeWindow) {
+        setTimeWindow(messagesTimeWindow);
+        setHasOlderData(messagesTimeWindow.olderDataAvailable);
+      }
+

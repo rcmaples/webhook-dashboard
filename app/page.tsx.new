@@ -76,7 +76,11 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes in milliseconds
 interface CachedData {
   attempts: Attempt[];
   documentIds: Record<string, string>;
-  messagesWithErrors: MessageWithError[];
+  messagesWithErrors: Array<{
+    id: string;
+    error: string;
+    payload?: string;
+  }>;
   timestamp: string;
   hasMoreData?: boolean;
 }
@@ -122,12 +126,6 @@ const DEFAULT_SETTINGS = {
 
 // Local storage key
 const SETTINGS_STORAGE_KEY = 'webhook-monitor-settings';
-
-interface MessageWithError {
-  id: string;
-  error: string;
-  payload?: string;
-}
 
 export default function WebhookMonitor() {
   const [messages, setMessages] = useState<ProcessedMessage[]>([]);
@@ -197,7 +195,6 @@ export default function WebhookMonitor() {
 
   const fetchData = async (forceRefresh = false, before?: string) => {
     try {
-      // If loading more data, use a different loading state
       if (before) {
         setIsLoadingMore(true);
       } else {
@@ -206,6 +203,17 @@ export default function WebhookMonitor() {
         setError(null);
         setLoadingProgress(0);
         setTotalItems(0);
+      }
+
+      // Check for time window information to enable loading more data
+      }
+
+      // Get time window information from the attempts API response
+      const attemptsData = await initialAttemptsResponse.json();
+
+      // Check for time window information to enable loading more data
+      if (attemptsTimeWindow) {
+        setHasOlderData(attemptsTimeWindow.olderDataAvailable);
       }
 
       // Add project ID and webhook ID as query parameters
@@ -325,8 +333,7 @@ export default function WebhookMonitor() {
         } else {
           const messagesData = await messagesResponse.json();
           const messageIdToDocumentId = messagesData.documentIds || {};
-          const messagesWithErrors: MessageWithError[] =
-            messagesData.messagesWithErrors || [];
+          const messagesWithErrors = messagesData.messagesWithErrors || [];
 
           // Cache the raw API data with a hasMore flag to indicate more data might be available
           const cacheData: CachedData = {
@@ -373,7 +380,7 @@ export default function WebhookMonitor() {
   const processApiData = (
     attempts: Attempt[],
     messageIdToDocumentId: Record<string, string>,
-    messagesWithErrors: MessageWithError[],
+    messagesWithErrors: Array<{ id: string; error: string; payload?: string }>,
     isLoadingMoreData = false
   ) => {
     // Create a Map for error messages for easier lookup
@@ -476,10 +483,7 @@ export default function WebhookMonitor() {
         attemptCount,
         successRate,
         hookId: attempts[0].hookId,
-        documentId:
-          messageId in messageIdToDocumentId
-            ? (messageIdToDocumentId as Record<string, string>)[messageId]
-            : undefined,
+        documentId,
         attempts,
         latestFailure,
         parsingError: errorMap.get(messageId) || null,
@@ -494,100 +498,7 @@ export default function WebhookMonitor() {
         new Date(a.newestAttempt).getTime()
     );
 
-    // If loading more data, merge with existing messages
-    if (isLoadingMoreData && messages.length > 0) {
-      // Create lookup maps with existing data
-      const existingMessageMap = new Map<string, ProcessedMessage>();
-      const existingAttemptMap = new Map<string, boolean>();
-
-      // Track existing message IDs and attempt IDs to avoid duplicates
-      messages.forEach((msg) => {
-        existingMessageMap.set(msg.messageId, msg);
-        msg.attempts.forEach((attempt) => {
-          existingAttemptMap.set(attempt.id, true);
-        });
-      });
-
-      let newAddedCount = 0;
-      let updatedCount = 0;
-
-      // Process new messages and merge with existing ones if needed
-      const combinedMessagesMap = new Map<string, ProcessedMessage>(
-        messages.map((msg) => [msg.messageId, { ...msg }])
-      );
-
-      // Process each new message
-      processedMessages.forEach((newMsg) => {
-        if (existingMessageMap.has(newMsg.messageId)) {
-          // This message exists - check if we need to merge attempts
-          const existingMsg = combinedMessagesMap.get(newMsg.messageId)!;
-
-          // Filter out attempts we already have
-          const newAttempts = newMsg.attempts.filter(
-            (attempt) => !existingAttemptMap.has(attempt.id)
-          );
-
-          if (newAttempts.length > 0) {
-            // We have new attempts to add to this message
-            const combinedAttempts = [...existingMsg.attempts, ...newAttempts];
-
-            // Sort attempts by creation time
-            combinedAttempts.sort(
-              (a, b) =>
-                new Date(a.createdAt).getTime() -
-                new Date(b.createdAt).getTime()
-            );
-
-            // Update the message with combined attempts
-            const updatedMsg: ProcessedMessage = {
-              ...existingMsg,
-              attempts: combinedAttempts,
-              oldestAttempt: combinedAttempts[0].createdAt,
-              newestAttempt:
-                combinedAttempts[combinedAttempts.length - 1].createdAt,
-              attemptCount: combinedAttempts.length,
-            };
-
-            // Recalculate success rate
-            const successfulAttempts = combinedAttempts.filter(
-              (a) => !a.isFailure
-            ).length;
-            updatedMsg.successRate =
-              (successfulAttempts / combinedAttempts.length) * 100;
-
-            // Update latest failure if needed
-            const failedAttempts = combinedAttempts.filter((a) => a.isFailure);
-            updatedMsg.latestFailure =
-              failedAttempts.length > 0
-                ? failedAttempts[failedAttempts.length - 1]
-                : null;
-
-            combinedMessagesMap.set(newMsg.messageId, updatedMsg);
-            updatedCount++;
-          }
-        } else {
-          // This is a completely new message
-          combinedMessagesMap.set(newMsg.messageId, newMsg);
-          newAddedCount++;
-        }
-      });
-
-      // Convert map back to array and sort
-      const combinedMessages = Array.from(combinedMessagesMap.values());
-      combinedMessages.sort(
-        (a, b) =>
-          new Date(b.newestAttempt).getTime() -
-          new Date(a.newestAttempt).getTime()
-      );
-
-      setMessages(combinedMessages);
-      console.log(
-        `Added ${newAddedCount} new messages and updated ${updatedCount} existing messages, total now: ${combinedMessages.length}`
-      );
-    } else {
-      // Just set the messages directly if not loading more
-      setMessages(processedMessages);
-    }
+    setMessages(processedMessages);
   };
 
   const handleSaveSettings = (newSettings: typeof DEFAULT_SETTINGS) => {
@@ -604,17 +515,7 @@ export default function WebhookMonitor() {
   };
 
   const getTimeAgo = (dateString: string) => {
-    try {
-      const date = new Date(dateString);
-      // Check if date is valid
-      if (isNaN(date.getTime())) {
-        return 'Invalid date';
-      }
-      return formatDistanceToNow(date, { addSuffix: true });
-    } catch (e) {
-      console.error('Error formatting date:', dateString, e);
-      return 'Unknown';
-    }
+    return formatDistanceToNow(new Date(dateString), { addSuffix: true });
   };
 
   const getStatusBadge = (successRate: number) => {
@@ -832,25 +733,28 @@ export default function WebhookMonitor() {
 
   // Add a function to load older data
   const handleLoadMore = async () => {
-    if (isLoadingMore || messages.length === 0) return;
+    if (isLoadingMore) return;
 
     setIsLoadingMore(true);
     try {
-      // Find the oldest message
-      const oldestMessage = [...messages].sort(
-        (a, b) =>
-          new Date(a.oldestAttempt).getTime() -
-          new Date(b.oldestAttempt).getTime()
-      )[0];
+      // Calculate timestamp for 24 hours ago from the oldest attempt
+      const oldestDate = new Date();
+      if (messages.length > 0) {
+        // Find the oldest attempt across all messages
+        const oldestMessage = [...messages].sort(
+          (a, b) =>
+            new Date(a.oldestAttempt).getTime() -
+            new Date(b.oldestAttempt).getTime()
+        )[0];
 
-      if (!oldestMessage) {
-        setIsLoadingMore(false);
-        return;
+        if (oldestMessage) {
+          oldestDate.setTime(new Date(oldestMessage.oldestAttempt).getTime());
+        }
+      } else {
+        // Default to 24 hours ago if no messages
+        oldestDate.setHours(oldestDate.getHours() - 24);
       }
 
-      // Calculate timestamp for the oldest attempt and subtract 1 minute to avoid overlap
-      const oldestDate = new Date(oldestMessage.oldestAttempt);
-      oldestDate.setMinutes(oldestDate.getMinutes() - 1); // Go 1 minute further back to avoid overlap
       console.log(`Loading more data before ${oldestDate.toISOString()}`);
 
       // Add project ID and webhook ID as query parameters
@@ -863,11 +767,11 @@ export default function WebhookMonitor() {
       const queryString = queryParams.toString();
 
       // Fetch both attempts and messages with the before parameter
-      const [attemptsResponse, messagesResponse] = await Promise.all([
-        fetch(`/api/webhook-attempts?${queryString}`),
-        fetch(`/api/webhook-messages?${queryString}`),
-      ]);
+      const attemptsPromise = fetch(`/api/webhook-attempts?${queryString}`);
+      const messagesPromise = fetch(`/api/webhook-messages?${queryString}`);
 
+      // Process the attempts
+      const attemptsResponse = await attemptsPromise;
       if (!attemptsResponse.ok) {
         throw new Error(
           `Attempts API responded with status: ${attemptsResponse.status}`
@@ -880,13 +784,13 @@ export default function WebhookMonitor() {
       // If no attempts, there's no more data
       if (allAttempts.length === 0) {
         setHasOlderData(false);
-        console.log('No more data available');
         return;
       }
 
       // Process messages to get document IDs
-      let messageIdToDocumentId: Record<string, string> = {};
-      let messagesWithErrors: MessageWithError[] = [];
+      const messagesResponse = await messagesPromise;
+      let messageIdToDocumentId = {};
+      let messagesWithErrors = [];
 
       if (messagesResponse.ok) {
         const messagesData = await messagesResponse.json();
@@ -894,20 +798,15 @@ export default function WebhookMonitor() {
         messagesWithErrors = messagesData.messagesWithErrors || [];
       }
 
-      console.log(`Fetched ${allAttempts.length} additional attempts`);
-      console.log(
-        `Fetched document IDs for ${
-          Object.keys(messageIdToDocumentId).length
-        } additional messages`
-      );
-
-      // Pass isLoadingMore as true to ensure data is merged properly
+      // Process the data
       processApiData(
         allAttempts,
         messageIdToDocumentId,
         messagesWithErrors,
         true
       );
+
+      console.log(`Loaded ${allAttempts.length} additional attempts`);
     } catch (error) {
       console.error('Error loading more data:', error);
       setError(
@@ -1467,19 +1366,85 @@ export default function WebhookMonitor() {
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
-                onClick={handleLoadMore}
-                disabled={
-                  isLoadingMore || messages.length === 0 || !hasOlderData
-                }
+                onClick={() => {
+                  if (messages.length === 0) return;
+
+                  // Find the oldest message
+                  const oldestMessage = [...messages].sort(
+                    (a, b) =>
+                      new Date(a.oldestAttempt).getTime() -
+                      new Date(b.oldestAttempt).getTime()
+                  )[0];
+
+                  if (!oldestMessage) return;
+
+                  // Set loading state
+                  setIsLoadingMore(true);
+
+                  // Build query with "before" parameter
+                  const oldestDate = new Date(oldestMessage.oldestAttempt);
+                  const queryParams = new URLSearchParams({
+                    projectId: settings.projectId,
+                    webhookId: settings.webhookId,
+                    before: oldestDate.toISOString(),
+                  }).toString();
+
+                  // Fetch data
+                  Promise.all([
+                    fetch(`/api/webhook-attempts?${queryParams}`),
+                    fetch(`/api/webhook-messages?${queryParams}`),
+                  ])
+                    .then(async ([attemptsResponse, messagesResponse]) => {
+                      if (!attemptsResponse.ok) {
+                        throw new Error(
+                          `API error: ${attemptsResponse.status}`
+                        );
+                      }
+
+                      const attemptsData = await attemptsResponse.json();
+                      const allAttempts = attemptsData.attempts || [];
+
+                      if (allAttempts.length === 0) {
+                        setHasOlderData(false);
+                        return;
+                      }
+
+                      let messageIdToDocumentId = {};
+                      let messagesWithErrors = [];
+
+                      if (messagesResponse.ok) {
+                        const messagesData = await messagesResponse.json();
+                        messageIdToDocumentId = messagesData.documentIds || {};
+                        messagesWithErrors =
+                          messagesData.messagesWithErrors || [];
+                      }
+
+                      // Process with loadingMore flag
+                      processApiData(
+                        allAttempts,
+                        messageIdToDocumentId,
+                        messagesWithErrors,
+                        true
+                      );
+                    })
+                    .catch((error) => {
+                      console.error('Error loading more data:', error);
+                      setError(
+                        error instanceof Error
+                          ? error.message
+                          : 'Failed to load more data'
+                      );
+                    })
+                    .finally(() => {
+                      setIsLoadingMore(false);
+                    });
+                }}
+                disabled={isLoadingMore || messages.length === 0}
                 className="gap-2">
                 {isLoadingMore && (
                   <RefreshCw className="h-4 w-4 animate-spin" />
                 )}
-                {isLoadingMore
-                  ? 'Loading older data...'
-                  : !hasOlderData && messages.length > 0
-                  ? 'No more data available'
-                  : 'Load older data'}
+                {isLoadingMore ? 'Loading older data...' : 'Load older data'}
               </Button>
             </div>
           )}

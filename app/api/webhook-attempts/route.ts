@@ -15,6 +15,8 @@ export async function GET(request: Request) {
     // Get pagination parameters from query
     const offsetParam = url.searchParams.get('offset');
     const limitParam = url.searchParams.get('limit');
+    // Get optional timestamp to load data before a certain point
+    const beforeTimestamp = url.searchParams.get('before');
 
     // Parse pagination parameters with defaults
     const initialOffset = offsetParam ? parseInt(offsetParam, 10) : 0;
@@ -33,10 +35,27 @@ export async function GET(request: Request) {
       );
     }
 
-    // Reduce timeframe from 24 hours to 12 hours to get fewer results
-    const twelveHoursAgo = new Date();
-    twelveHoursAgo.setHours(twelveHoursAgo.getHours() - 12);
-    const fromTimestamp = twelveHoursAgo.toISOString();
+    // Set the time window based on the 'before' parameter or default to recent data
+    let timeWindowStart;
+    let timeWindowEnd;
+
+    if (beforeTimestamp) {
+      // If 'before' parameter provided, load data from a 24-hour window before that time
+      timeWindowEnd = new Date(beforeTimestamp);
+      timeWindowStart = new Date(beforeTimestamp);
+      timeWindowStart.setHours(timeWindowStart.getHours() - 24);
+      console.log(
+        `Loading data from ${timeWindowStart.toISOString()} to ${timeWindowEnd.toISOString()}`
+      );
+    } else {
+      // Default: load data from the last 12 hours
+      timeWindowEnd = new Date();
+      timeWindowStart = new Date();
+      timeWindowStart.setHours(timeWindowStart.getHours() - 12);
+      console.log(
+        `Loading recent data from last 12 hours (${timeWindowStart.toISOString()})`
+      );
+    }
 
     // Updated URL structure based on Sanity.io API documentation
     const baseUrl = `https://api.sanity.io/v2021-10-04/hooks/projects/${projectId}/${webhookId}/attempts`;
@@ -102,11 +121,14 @@ export async function GET(request: Request) {
         // Filter data to only include attempts from the last 12 hours
         const recentAttempts = data.filter((attempt: WebhookAttempt) => {
           const attemptDate = new Date(attempt.createdAt);
-          return attemptDate >= twelveHoursAgo;
+          return attemptDate >= timeWindowStart && attemptDate <= timeWindowEnd;
         });
 
+        const timeWindowDescription = beforeTimestamp
+          ? 'the specified time window'
+          : 'the last 12 hours';
         console.log(
-          `${recentAttempts.length} attempts are within the last 12 hours`
+          `${recentAttempts.length} attempts are within ${timeWindowDescription}`
         );
 
         return recentAttempts;
@@ -136,7 +158,7 @@ export async function GET(request: Request) {
     // There might be more data available
     const hasMore = offsets.length >= MAX_PAGES;
 
-    // Return the data with pagination metadata
+    // Return the data with pagination metadata and time window information
     return NextResponse.json({
       attempts: allAttempts,
       pagination: {
@@ -146,6 +168,12 @@ export async function GET(request: Request) {
         nextOffset: hasMore ? initialOffset + limit : null,
         totalFetched: allAttempts.length,
         pages: PAGES_TO_FETCH,
+      },
+      timeWindow: {
+        start: timeWindowStart.toISOString(),
+        end: timeWindowEnd.toISOString(),
+        olderDataAvailable:
+          !beforeTimestamp || new Date(timeWindowStart).getTime() > 0, // Indicate if there might be older data
       },
     });
   } catch (error: unknown) {
