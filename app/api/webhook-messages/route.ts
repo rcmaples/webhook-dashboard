@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server';
 
+interface WebhookMessage {
+  id: string;
+  createdAt: string;
+  payload?: string;
+  [key: string]: any;
+}
+
 export async function GET(request: Request) {
   try {
     // Get project ID and webhook ID from query parameters
@@ -45,28 +52,19 @@ export async function GET(request: Request) {
       timeWindowEnd = new Date(beforeTimestamp);
       timeWindowStart = new Date(beforeTimestamp);
       timeWindowStart.setHours(timeWindowStart.getHours() - 12);
-      console.log(
-        `Loading messages from ${timeWindowStart.toISOString()} to ${timeWindowEnd.toISOString()}`
-      );
     } else {
       // Default: load data from the last 6 hours
       timeWindowEnd = new Date();
       timeWindowStart = new Date();
       timeWindowStart.setHours(timeWindowStart.getHours() - 6);
-      console.log(
-        `Fetching messages from the last 6 hours (since ${timeWindowStart.toISOString()})`
-      );
     }
 
     // Create offsets for parallel requests
     const offsets = Array.from({ length: MAX_PAGES }, (_, i) => i * limit);
 
-    console.log(`Starting ${offsets.length} parallel requests for messages`);
-
     // Execute requests in parallel with Promise.all
     const fetchPromises = offsets.map(async (currentOffset) => {
       const apiUrl = `${baseUrl}?limit=${limit}&offset=${currentOffset}`;
-      console.log(`Fetching messages from: ${apiUrl}`);
 
       try {
         const response = await fetch(apiUrl, {
@@ -87,28 +85,20 @@ export async function GET(request: Request) {
             errorText = await response.text();
           }
 
-          console.error(`API error: ${response.status} - ${errorText}`);
           return []; // Return empty array instead of throwing to allow other requests to complete
         }
 
         const data = await response.json();
-        console.log(
-          `Fetched ${data.length} messages at offset ${currentOffset}`
-        );
 
         if (data.length === 0) {
           return [];
         }
 
         // Filter data to only include messages from the last 6 hours
-        const recentMessages = data.filter((message) => {
+        const recentMessages = data.filter((message: WebhookMessage) => {
           const messageDate = new Date(message.createdAt);
           return messageDate >= timeWindowStart && messageDate <= timeWindowEnd;
         });
-
-        console.log(
-          `${recentMessages.length} messages are within the last 6 hours at offset ${currentOffset}`
-        );
 
         return recentMessages;
       } catch (error) {
@@ -133,8 +123,14 @@ export async function GET(request: Request) {
     );
 
     // Process messages to extract document IDs
-    const messageIdToDocumentId = {};
-    const messagesWithParsingErrors = [];
+    const messageIdToDocumentId: Record<string, string> = {};
+
+    interface ParsingError {
+      id: string;
+      error: string;
+    }
+
+    const messagesWithParsingErrors: ParsingError[] = [];
 
     allMessages.forEach((message) => {
       try {
@@ -147,22 +143,10 @@ export async function GET(request: Request) {
       } catch (error) {
         messagesWithParsingErrors.push({
           id: message.id,
-          error: error.message,
-          payload: message.payload
-            ? message.payload.substring(0, 100) + '...'
-            : null, // Include a snippet of the problematic payload
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     });
-
-    console.log(
-      `Extracted document IDs for ${
-        Object.keys(messageIdToDocumentId).length
-      } messages`
-    );
-    console.log(
-      `Found ${messagesWithParsingErrors.length} messages with JSON parsing errors`
-    );
 
     return NextResponse.json({
       documentIds: messageIdToDocumentId,
@@ -178,7 +162,12 @@ export async function GET(request: Request) {
   } catch (error) {
     console.error('Error fetching webhook messages:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to fetch webhook messages' },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to fetch webhook messages',
+      },
       { status: 500 }
     );
   }

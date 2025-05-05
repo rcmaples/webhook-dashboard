@@ -237,13 +237,6 @@ export default function WebhookMonitor() {
       }
 
       const attemptsData = await initialAttemptsResponse.json();
-      console.log('Raw API response structure:', {
-        hasAttemptsArray: Array.isArray(attemptsData.attempts),
-        attemptsLength: attemptsData.attempts?.length,
-        sampleAttempt:
-          attemptsData.attempts?.length > 0 ? attemptsData.attempts[0] : null,
-        paginationInfo: attemptsData.pagination,
-      });
 
       // Display more detail about the data shape
       if (attemptsData.attempts?.length > 0) {
@@ -254,9 +247,6 @@ export default function WebhookMonitor() {
             messageIds.add(attempt.messageId);
           }
         });
-        console.log(
-          `API returned ${attemptsData.attempts.length} webhook attempts with ${messageIds.size} unique message IDs`
-        );
       }
 
       const allAttempts: Attempt[] = attemptsData.attempts || [];
@@ -270,9 +260,6 @@ export default function WebhookMonitor() {
 
       // Process just the initial batch to show something fast
       processApiData(initialAttempts, initialDocumentIds, [], isLoadingMore);
-      console.log(
-        `Processed initial batch of ${initialAttempts.length} attempts out of ${allAttempts.length} total`
-      );
 
       // Update loading state to indicate we're now loading the full dataset
       setLoadingState(LoadingState.LOADING_FULL);
@@ -304,9 +291,6 @@ export default function WebhookMonitor() {
           // Update progress
           const processedCount = initialBatchSize + batchEnd;
           setLoadingProgress(processedCount);
-          console.log(
-            `Processed batch ${i}-${batchEnd} of ${remainingAttempts.length} remaining attempts (${processedCount}/${allAttempts.length})`
-          );
 
           // Small delay to allow UI to update and not block rendering
           await new Promise((resolve) => setTimeout(resolve, 10));
@@ -348,9 +332,6 @@ export default function WebhookMonitor() {
 
           // Set final progress
           setLoadingProgress(allAttempts.length);
-          console.log(
-            `Final processing complete with ${allAttempts.length} total attempts and document IDs`
-          );
         }
       } catch (err) {
         console.error('Error processing full dataset:', err);
@@ -386,33 +367,11 @@ export default function WebhookMonitor() {
     // Track message IDs with parsing errors
     const errorMessageIds = messagesWithErrors.map((item) => item.id);
 
-    console.log(`Fetched ${attempts.length} total webhook attempts`);
-    console.log(
-      `Fetched document IDs for ${
-        Object.keys(messageIdToDocumentId).length
-      } messages`
-    );
-    console.log(
-      `Found ${messagesWithErrors.length} messages with JSON parsing errors`
-    );
-
     // Process the data to group by messageId
     const messageMap = new Map<string, Attempt[]>();
 
-    // Log the first few attempts to debug
-    console.log(
-      'Sample attempts:',
-      attempts.slice(0, 3).map((a) => ({
-        id: a.id,
-        messageId: a.messageId,
-        createdAt: a.createdAt,
-        isFailure: a.isFailure,
-      }))
-    );
-
     attempts.forEach((attempt) => {
       if (!attempt.messageId) {
-        console.warn('Found attempt without messageId:', attempt.id);
         return;
       }
 
@@ -421,11 +380,6 @@ export default function WebhookMonitor() {
       }
       messageMap.get(attempt.messageId)?.push(attempt);
     });
-
-    console.log(`Found ${messageMap.size} unique messages`);
-
-    // Log the message IDs for debugging
-    console.log('Message IDs:', Array.from(messageMap.keys()).slice(0, 10));
 
     // Calculate the required information for each message
     const processedMessages: ProcessedMessage[] = [];
@@ -581,9 +535,6 @@ export default function WebhookMonitor() {
       );
 
       setMessages(combinedMessages);
-      console.log(
-        `Added ${newAddedCount} new messages and updated ${updatedCount} existing messages, total now: ${combinedMessages.length}`
-      );
     } else {
       // Just set the messages directly if not loading more
       setMessages(processedMessages);
@@ -766,18 +717,6 @@ export default function WebhookMonitor() {
   const endIndex = Math.min(startIndex + itemsPerPage, sortedMessages.length);
   const currentMessages = sortedMessages.slice(startIndex, endIndex);
 
-  // Add debugging
-  console.log('Pagination debug:', {
-    totalMessages: messages.length,
-    filteredCount: filteredMessages.length,
-    sortedCount: sortedMessages.length,
-    currentPageCount: currentMessages.length,
-    currentPage,
-    itemsPerPage,
-    startIndex,
-    endIndex,
-  });
-
   // Generate page numbers for pagination
   const getPageNumbers = () => {
     const pages = [];
@@ -851,7 +790,6 @@ export default function WebhookMonitor() {
       // Calculate timestamp for the oldest attempt and subtract 1 minute to avoid overlap
       const oldestDate = new Date(oldestMessage.oldestAttempt);
       oldestDate.setMinutes(oldestDate.getMinutes() - 1); // Go 1 minute further back to avoid overlap
-      console.log(`Loading more data before ${oldestDate.toISOString()}`);
 
       // Add project ID and webhook ID as query parameters
       const queryParams = new URLSearchParams({
@@ -880,7 +818,6 @@ export default function WebhookMonitor() {
       // If no attempts, there's no more data
       if (allAttempts.length === 0) {
         setHasOlderData(false);
-        console.log('No more data available');
         return;
       }
 
@@ -893,13 +830,6 @@ export default function WebhookMonitor() {
         messageIdToDocumentId = messagesData.documentIds || {};
         messagesWithErrors = messagesData.messagesWithErrors || [];
       }
-
-      console.log(`Fetched ${allAttempts.length} additional attempts`);
-      console.log(
-        `Fetched document IDs for ${
-          Object.keys(messageIdToDocumentId).length
-        } additional messages`
-      );
 
       // Pass isLoadingMore as true to ensure data is merged properly
       processApiData(
@@ -1161,11 +1091,7 @@ export default function WebhookMonitor() {
                                   large
                                 </div>
                               ) : (
-                                <div
-                                  className="text-xs text-muted-foreground truncate"
-                                  title={message.hookId}>
-                                  Hook: {message.hookId}
-                                </div>
+                                ''
                               )}
                             </TableCell>
                             <TableCell>

@@ -44,17 +44,11 @@ export async function GET(request: Request) {
       timeWindowEnd = new Date(beforeTimestamp);
       timeWindowStart = new Date(beforeTimestamp);
       timeWindowStart.setHours(timeWindowStart.getHours() - 24);
-      console.log(
-        `Loading data from ${timeWindowStart.toISOString()} to ${timeWindowEnd.toISOString()}`
-      );
     } else {
       // Default: load data from the last 12 hours
       timeWindowEnd = new Date();
       timeWindowStart = new Date();
       timeWindowStart.setHours(timeWindowStart.getHours() - 12);
-      console.log(
-        `Loading recent data from last 12 hours (${timeWindowStart.toISOString()})`
-      );
     }
 
     // Updated URL structure based on Sanity.io API documentation
@@ -79,15 +73,10 @@ export async function GET(request: Request) {
       (_, i) => initialOffset + i * limit
     );
 
-    console.log(
-      `Starting to fetch webhook attempts with ${offsets.length} parallel requests`
-    );
-
     // Execute requests in parallel with Promise.all
     const requestPromises = offsets.map(async (currentOffset) => {
       // Construct the API URL with pagination parameters
       const apiUrl = `${baseUrl}?limit=${limit}&offset=${currentOffset}`;
-      console.log(`Fetching attempts page from: ${apiUrl}`);
 
       try {
         // Fetch data
@@ -114,9 +103,6 @@ export async function GET(request: Request) {
         }
 
         const data = (await response.json()) as WebhookAttempt[];
-        console.log(
-          `Fetched ${data.length} attempts at offset ${currentOffset}`
-        );
 
         // Filter data to only include attempts from the last 12 hours
         const recentAttempts = data.filter((attempt: WebhookAttempt) => {
@@ -127,9 +113,6 @@ export async function GET(request: Request) {
         const timeWindowDescription = beforeTimestamp
           ? 'the specified time window'
           : 'the last 12 hours';
-        console.log(
-          `${recentAttempts.length} attempts are within ${timeWindowDescription}`
-        );
 
         return recentAttempts;
       } catch (error) {
@@ -152,8 +135,6 @@ export async function GET(request: Request) {
       (a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-
-    console.log(`Total webhook attempts fetched: ${allAttempts.length}`);
 
     // There might be more data available
     const hasMore = offsets.length >= MAX_PAGES;
